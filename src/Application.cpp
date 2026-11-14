@@ -9,7 +9,6 @@
 #include <QFileInfo>
 #include <QProxyStyle>
 #include <QStyleOption>
-#include <QDesktopWidget>
 #include <QScreen>
 
 #include "Application.h"
@@ -97,7 +96,7 @@ Application::Application(int& argc, char** argv) :
                 if(!env.isEmpty())
                 {
                     qWarning() << qPrintable(tr("The user settings file location is replaced with the argument value instead of the environment variable value."));
-                    qWarning() << qPrintable(tr("Ignored environment variable(DB4S_SETTINGS_FILE) value : ") + env);
+                    qWarning() << qPrintable(tr("Ignored environment variable (DB4S_SETTINGS_FILE) value: ") + env);
                 }
                 Settings::setUserSettingsFile(arguments().at(i));
             }
@@ -177,10 +176,10 @@ Application::Application(int& argc, char** argv) :
         if(arguments().at(i) == "-h" || arguments().at(i) == "--help")
         {
             // Help
-            qWarning() << qPrintable(QString("%1: %2 [%3] [<%4>|<%5>|%6]\n").
-                                     arg(tr("Usage")).arg(QFileInfo(argv[0]).fileName()).
-                                     arg(tr("options")).arg(tr("database")).arg(tr("project")).
-                                     arg(tr("csv-file")));
+            qWarning() << qPrintable(QString("%1: %2 [%3] [<%4>|<%5>|%6]\n").arg(
+                                     tr("Usage"), QFileInfo(argv[0]).fileName(),
+                                     tr("options"), tr("database"), tr("project"),
+                                     tr("csv-file")));
 
             qWarning() << qPrintable(tr("Possible command line arguments:"));
             printArgument(QString("-h, --help"),
@@ -197,9 +196,9 @@ Application::Application(int& argc, char** argv) :
                           tr("Open database in read-only mode"));
             printArgument(QString("-S, --settings <%1>").arg(tr("settings_file")),
                           tr("Run application based on this settings file"));
-            printArgument(QString("-o, --option <%1>/<%2>=<%3>").arg(tr("group")).arg(tr("settings")).arg(tr("value")),
+            printArgument(QString("-o, --option <%1>/<%2>=<%3>").arg(tr("group"), tr("settings"), tr("value")),
                           tr("Run application with this setting temporarily set to value"));
-            printArgument(QString("-O, --save-option <%1>/<%2>=<%3>").arg(tr("group")).arg(tr("settings")).arg(tr("value")),
+            printArgument(QString("-O, --save-option <%1>/<%2>=<%3>").arg(tr("group"), tr("settings"), tr("value")),
                           tr("Run application saving this value for this setting"));
             printArgument(QString("-v, --version"),
                           tr("Display the current version"));
@@ -272,7 +271,7 @@ Application::Application(int& argc, char** argv) :
             if(QFile::exists(arguments().at(i)))
                 fileToOpen = arguments().at(i);
             else
-                qWarning() << qPrintable(tr("Invalid option/non-existant file: %1").arg(arguments().at(i)));
+                qWarning() << qPrintable(tr("Invalid option/non-existent file: %1").arg(arguments().at(i)));
         }
     }
 
@@ -284,6 +283,9 @@ Application::Application(int& argc, char** argv) :
     // Set StyleProxy
     QScreen *screen = primaryScreen();
     setStyle(new DB4SProxyStyle(18, screen != nullptr ? screen->logicalDotsPerInch() : 96, style()));
+
+    // Skip db/project autoLoadLastDBFileAtStartup if we have file passed from the cli
+    Settings::setValue("tmp", "fileWillBeOpenedFromCLI", !fileToOpen.isEmpty(), false);
 
     // Show main window
     m_mainWindow = new MainWindow();
@@ -328,6 +330,7 @@ Application::~Application()
 {
     if(m_mainWindow)
         delete m_mainWindow;
+    Settings::sync();
 }
 
 bool Application::event(QEvent* event)
@@ -365,9 +368,10 @@ QString Application::versionInformation()
         sqlite_version = tr("SQLCipher Version %1 (based on SQLite %2)").arg(sqlcipher_version, sqlite_version);
 
     return
-        tr("DB Browser for SQLite Version %1.").arg(versionString() + "\n\n" +
+        tr("DB Browser for SQLite Version %1.").arg(versionString() + "\n" +
+        tr("Last commit hash when built: %1").arg(GIT_COMMIT_HASH) + "\n\n" +
         tr("Built for %1, running on %2").arg(QSysInfo::buildAbi(), QSysInfo::currentCpuArchitecture()) + "\n" +
-        tr("Qt Version %1").arg(QT_VERSION_STR) + "\n" +
+        tr("Qt Version %1").arg(qVersion()) + "\n" +
         sqlite_version
         );
 }

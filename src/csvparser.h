@@ -53,7 +53,7 @@ class CSVParser
 public:
     using csvRowFunction = std::function<bool(size_t, CSVRow)>;
 
-    CSVParser(bool trimfields = true, char32_t fieldseparator = ',', char32_t quotechar = '"');
+    explicit CSVParser(bool trimfields = true, char32_t fieldseparator = ',', char32_t quotechar = '"');
     ~CSVParser();
 
     enum ParserResult
@@ -95,6 +95,8 @@ private:
     int64_t m_nBufferSize;        //! internal buffer read size
 
     bool look_ahead(QTextStream& stream, QByteArray& sBuffer, const char** it, const char** sBufferEnd, char expected);
+    bool look_ahead(QTextStream& stream, QByteArray& sBuffer, const char** it, const char** sBufferEnd,
+                    const char* expected, int extraBytes);
 };
 
 #endif

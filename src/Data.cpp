@@ -4,9 +4,9 @@
 #include <QDateTime>
 #include <QImageReader>
 #include <QLocale>
-#include <QRegExp>
 #include <QTextCodec>
 #include <QFile>
+#include <QRegularExpression>
 
 #include <algorithm>
 
@@ -28,7 +28,7 @@ bool isTextOnly(QByteArray data, const QString& encoding, bool quickTest)
     }
 
     // Truncate to the first few bytes for quick testing
-    int testSize = quickTest? std::min(512, data.size()) : data.size();
+    QByteArray::size_type testSize = quickTest? std::min(QByteArray::size_type(512), data.size()) : data.size();
 
     // If the quick test has been requested and we have to truncate the string, we have to use
     // an approach where truncated multibyte characters are not interpreted as invalid characters.
@@ -186,49 +186,124 @@ void removeCommentsFromQuery(QString& query)
     QChar quote;
     for(int i=0;i<query.size();i++)
     {
-	// Are we in quote state?
-	if(quote.isNull())
-	{
-		// We are currently not in quote state
+        // Are we in quote state?
+        if(quote.isNull())
+        {
+            // We are currently not in quote state
 
-		// So are we starting a quote?
-		if((query.at(i) == '\'' || query.at(i) == '\"' || query.at(i) == '[') && (i == 0 || query.at(i-1) != '\\'))
-	    {
-		// Quoted text is beginning. Switch to the quote state
+            // So are we starting a quote?
+            if((query.at(i) == '\'' || query.at(i) == '\"' || query.at(i) == '[') && (i == 0 || query.at(i-1) != '\\'))
+            {
+                // Quoted text is beginning. Switch to the quote state
 
-		quote = query.at(i);
-	    } else if(query.at(i) == '-' && i+1 < query.size() && query.at(i+1) == '-') {
-		// This is an end of line comment. Remove anything till the end of the line or the end of the string if this is the last line
+                quote = query.at(i);
+            } else if(query.at(i) == '-' && i+1 < query.size() && query.at(i+1) == '-') {
+                // This is an end of line comment. Remove anything till the end of the line or the end of the string if this is the last line
 
-		int pos_next_line_break = query.indexOf('\n', i);
-		if(pos_next_line_break == -1)
-			query = query.left(i);
-		else
-			query.remove(i, pos_next_line_break - i);       // The \n is left in intentionally
-	    } else if(query.at(i) == '/' && i+1 < query.size() && query.at(i+1) == '*') {
-		// This is a block comment. Remove anything till the end of the block or the end of the string if the block is not closed
-		int pos_end_comment = query.indexOf("*/", i);
-		if(pos_end_comment == -1)
-			query = query.left(i);
-		else
-			query.remove(i, pos_end_comment - i + 2);       // Add 2 to include the */
-	    }
-	} else {
-		// We are currently in quote state
+                int pos_next_line_break = query.indexOf('\n', i);
+                if(pos_next_line_break == -1)
+                    query = query.left(i);
+                else
+                    query.remove(i, pos_next_line_break - i);       // The \n is left in intentionally
+            } else if(query.at(i) == '/' && i+1 < query.size() && query.at(i+1) == '*') {
+                // This is a block comment. Remove anything till the end of the block or the end of the string if the block is not closed
+                int pos_end_comment = query.indexOf("*/", i);
+                if(pos_end_comment == -1)
+                    query = query.left(i);
+                else
+                    query.remove(i, pos_end_comment - i + 2);       // Add 2 to include the */
+            }
+        } else {
+            // We are currently in quote state
 
-		// If this is the closing quote character, switch back to normal state
-		if((query.at(i) == quote) && (i == 0 || query.at(i-1) != '\\'))
-		quote = 0;
-	}
+            // If this is the closing quote character, switch back to normal state
+            if((query.at(i) == quote) && (i == 0 || query.at(i-1) != '\\'))
+                quote = QChar(0);
+        }
     }
 
     query = query.trimmed();
 
     if (oldSize != query.size()) {
-	// Remove multiple line breaks that might have been created by deleting comments till the end of the line but not including the line break
-	query.replace(QRegExp("\\n+"), "\n");
+        // Remove multiple line breaks that might have been created by deleting comments till the end of the line but not including the line break
+        query.replace(QRegularExpression("\\n+"), "\n");
 
-	// Also remove any remaining whitespace at the end of each line
-	query.replace(QRegExp("[ \t]+\n"), "\n");
+        // Also remove any remaining whitespace at the end of each line
+        query.replace(QRegularExpression("[ \t]+\n"), "\n");
     }
+}
+
+using BufferRow = std::vector<QByteArray>;
+
+std::vector<BufferRow> parseClipboard(QString clipboard)
+{
+    // Remove trailing line break from the clipboard text. This is necessary because some applications append an extra
+    // line break to the clipboard contents which we would then interpret as regular data, setting the first field of the
+    // first row after the paste area to NULL. One problem here is that this breaks for those cases where an empty line at
+    // the end of the selection is explicitly copied and the originating application doesn't add an extra line break. However,
+    // there are two reasons for favoring this way: 1) Spreadsheet applications seem to add an extra line break and they are
+    // probably the main source for pasted data, 2) Having to manually delete on extra field seems to be less problematic than
+    // having one extra field deleted without any warning.
+
+    if (clipboard.endsWith("\n"))
+        clipboard.chop(1);
+    if (clipboard.endsWith("\r"))
+        clipboard.chop(1);
+
+    // Make sure there is some data in the clipboard
+    std::vector<BufferRow> result;
+    if (clipboard.isEmpty())
+        return result;
+
+    result.push_back(BufferRow());
+
+    // A quoted field must start at the beginning of a row or just after a tab.
+    const static QRegularExpression re(
+        "(?:^|(?<=[\t\n]))(\"(?:[^\t\"]+|\"\"[^\"]*\"\")*)\"|(\t|\r?\n)",
+        QRegularExpression::DotMatchesEverythingOption);
+    int offset = 0;
+    int whitespace_offset = 0;
+
+    const auto nomalize_text = [](QString &&text) {
+        const static QRegularExpression re_between_quotes(
+            QRegularExpression::anchoredPattern("\".*\""), QRegularExpression::DotMatchesEverythingOption);
+        if (re_between_quotes.match(text).hasMatch()) {
+            text = text.mid(1, text.length() - 2);
+            text.replace("\"\"", "\"");  // replace escaped quotes only inside quoted fields
+        }
+        text.replace(char(0x01), '\t'); // libreoffice converts "tab" in the text with "SOH(0x01)", convert it back
+        return text.toUtf8();
+    };
+
+    while (offset >= 0) {
+        const QRegularExpressionMatch match = re.match(clipboard, offset);
+        const int pos = match.capturedStart(0);
+        if (pos < 0) {
+            // insert everything that left
+            result.back().push_back(nomalize_text(clipboard.mid(whitespace_offset)));
+            break;
+        }
+
+        if (match.capturedStart(2) < 0) {
+            offset = pos + match.capturedLength(1) + 1;
+            continue;
+        }
+
+        // if two whitespaces in row - that's an empty cell
+        if (!(pos - whitespace_offset)) {
+            result.back().push_back(QByteArray());
+        } else {
+            result.back().push_back(nomalize_text(clipboard.mid(whitespace_offset, pos - whitespace_offset)));
+        }
+
+        const QString ws = match.captured(2);
+        if (ws.endsWith("\n")) {
+            // create new row
+            result.push_back(BufferRow());
+        }
+
+        whitespace_offset = offset = pos + ws.length();
+    }
+
+    return result;
 }

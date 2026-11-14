@@ -17,6 +17,7 @@ private slots:
     void strictAndWithoutRowid();
     void foreignKeys();
     void uniqueConstraint();
+    void addAndRemoveKeyInConstraint();
 
     void parseSQL();
     void parseSQLSquareBrackets();
@@ -35,6 +36,7 @@ private slots:
     void parseSQLForeignKeys();
     void parseSQLCheckConstraint();
     void parseDefaultValues();
+    void parseDoubleQuotedDefaultValues();
     void createTableWithIn();
     void createTableWithNotLikeConstraint();
     void rowValues();

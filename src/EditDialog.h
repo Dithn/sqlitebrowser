@@ -21,7 +21,10 @@ public:
     ~EditDialog() override;
 
     void setCurrentIndex(const QModelIndex& idx);
+    bool isModified() const;
+    void setModified(bool modified);
     QPersistentModelIndex currentIndex() const { return m_currentIndex; }
+    void promptSaveData();
 
 public slots:
     void setFocus();
@@ -45,6 +48,7 @@ private slots:
     void switchEditorMode(bool autoSwitchForType);
     void updateCellInfoAndMode(const QByteArray& bArrdata);
     void setMustIndentAndCompact(bool enable);
+    void setMustSortKeys(bool enable);
     void openPrintDialog();
     void copyHexAscii();
     void setWordWrapping(bool value);
@@ -64,6 +68,7 @@ private:
     int dataType;
     bool isReadOnly;
     bool mustIndentAndCompact;
+    bool mustSortKeys;
     QByteArray removedBom;
 
     enum DataSources {

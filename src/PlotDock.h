@@ -12,6 +12,7 @@ class QMenu;
 class QPrinter;
 class QTreeWidgetItem;
 class QCPAxis;
+class QMouseEvent;
 
 class SqliteTableModel;
 struct BrowseDataTableSettings;
@@ -97,9 +98,12 @@ private:
     bool m_showLegend;
     bool m_stackedBars;
     bool m_fixedFormat;
+    bool m_logScaleX;
+    bool m_logScaleY;
     Palette m_graphPalette;
     std::vector<QCPAxis *> yAxes;
     std::vector<int> PlotColumnY;
+    unsigned int m_xtype;
 
     /*!
      * \brief guessdatatype try to parse the first 10 rows and decide the datatype
@@ -110,16 +114,18 @@ private:
     QVariant::Type guessDataType(SqliteTableModel* model, int column) const;
     void adjustBars();
     void adjustAxisFormat();
+    void updateLogScale();
 
 private slots:
-    void on_treePlotColumns_itemChanged(QTreeWidgetItem* item, int column);
-    void on_treePlotColumns_itemDoubleClicked(QTreeWidgetItem* item, int column);
-    void on_butSavePlot_clicked();
-    void on_comboLineType_currentIndexChanged(int index);
-    void on_comboPointShape_currentIndexChanged(int index);
+    void columnItemChanged(QTreeWidgetItem* item, int column);
+    void columnItemDoubleClicked(QTreeWidgetItem* item, int column);
+    void savePlot();
+    void lineTypeChanged(int index);
+    void pointShapeChanged(int index);
     void selectionChanged();
     void mousePress();
     void mouseWheel();
+    void mouseMove(QMouseEvent* event);
     void copy();
     void toggleLegendVisible(bool visible);
     void toggleStackedBars(bool stacked);

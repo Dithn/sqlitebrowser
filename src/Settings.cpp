@@ -159,6 +159,18 @@ QVariant Settings::getDefaultValue(const std::string& group, const std::string& 
     if(group == "db" && name == "fontsize")
         return 10;
 
+    // db/watcher?
+    if(group == "db" && name == "watcher")
+        return false;
+
+    // db/sqlcipherparentdotenvlookup?
+    if(group == "db" && name == "sqlcipherparentdotenvlookup")
+        return false;
+
+    // db/warnlockingdisabled?
+    if(group == "db" && name == "warnlockingdisabled")
+        return true;
+
     // exportcsv/firstrowheader?
     if(group == "exportcsv" && name == "firstrowheader")
         return true;
@@ -235,9 +247,13 @@ QVariant Settings::getDefaultValue(const std::string& group, const std::string& 
     if(group == "General" && name == "maxRecentFiles")
         return 5;
 
+    // General/recentfileshortcuts?
+    if(group == "General" && name == "recentfileshortcuts")
+        return false;
+
     // General/language?
     if(group == "General" && name == "language")
-        return QLocale::system().name();
+        return systemLanguage();
 
     // General/appStyle
     if(group == "General" && name == "appStyle")
@@ -288,18 +304,27 @@ QVariant Settings::getDefaultValue(const std::string& group, const std::string& 
     // Data Browser/NULL Fields
     if(group == "databrowser")
     {
-        if(name == "font")
-            return QFont().defaultFamily();
+        if(name == "font") {
+            QFont font("Monospace");
+            font.setStyleHint(QFont::TypeWriter);
+            return QFontInfo(font).family();
+        }
         if(name == "fontsize")
             return 10;
         if(name == "symbol_limit")
             return 5000;
+        if (name == "rows_limit")
+            return 10'000'000;
         if(name == "complete_threshold")
             return 1000;
         if(name == "image_preview")
             return false;
+        if(name == "cell_word_wrap")
+            return true;
         if(name == "indent_compact")
             return false;
+        if (name == "sort_keys")
+          return true;
         if(name == "auto_switch_mode")
             return true;
         if(name == "editor_word_wrap")
@@ -425,27 +450,17 @@ QVariant Settings::getDefaultValue(const std::string& group, const std::string& 
     // SchemaDock Drag & drop settings
     if(group == "SchemaDock")
     {
+        if(name == "dropSelectQuery")
+            return true;
+
+        if(name == "dropInsert")
+            return false;
+
         if(name == "dropQualifiedNames")
             return false;
 
         if(name == "dropEnquotedNames")
             return true;
-    }
-
-    // Remote settings?
-    if(group == "remote")
-    {
-        // Enable the File → Remote menu by default
-        if(name == "active")
-            return true;
-
-        // Clone directory
-        if(name == "clonedirectory")
-#if QT_VERSION >= QT_VERSION_CHECK(5, 4, 0)
-            return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-#else
-            return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
-#endif
     }
 
     // Proxy settings
@@ -465,6 +480,8 @@ QColor Settings::getDefaultColorValue(const std::string& group, const std::strin
     // Data Browser/NULL & Binary Fields
     if(group == "databrowser")
     {
+        // The switch on style can be removed if the following issue is fixed:
+        // https://github.com/ColinDuquesnoy/QDarkStyleSheet/issues/171
         switch (style) {
         case FollowDesktopStyle :
             if(name == "null_fg_colour")
@@ -475,6 +492,10 @@ QColor Settings::getDefaultColorValue(const std::string& group, const std::strin
                 return QPalette().color(QPalette::Active, QPalette::Text).name();
             if(name == "reg_bg_colour")
                 return QPalette().color(QPalette::Active, QPalette::Base).name();
+            if(name == "formatted_fg_colour")
+                return QPalette().color(QPalette::Active, QPalette::Text).name();
+            if(name == "formatted_bg_colour")
+                return QPalette().color(QPalette::Active, QPalette::AlternateBase).name();
             if(name == "bin_fg_colour")
                 return QColor(Qt::lightGray).name();
             if(name == "bin_bg_colour")
@@ -489,6 +510,10 @@ QColor Settings::getDefaultColorValue(const std::string& group, const std::strin
                 return QColor(0xF0, 0xF0, 0xF0);
             if(name == "reg_bg_colour")
                 return QColor(0x19, 0x23, 0x2D);
+            if(name == "formatted_fg_colour")
+                return QColor(0xF0, 0xF0, 0xF0);
+            if(name == "formatted_bg_colour")
+                return QColor(0x19, 0x23, 0x2D);
             if(name == "bin_fg_colour")
                 return QColor(0x78, 0x78, 0x78);
             if(name == "bin_bg_colour")
@@ -496,13 +521,17 @@ QColor Settings::getDefaultColorValue(const std::string& group, const std::strin
             break;
         case LightStyle :
             if(name == "null_fg_colour" || name == "bin_fg_colour")
-                return QColor("#A5A9AC");
+                return QColor(0xA5, 0xA9, 0xAC);
             if(name == "null_bg_colour" || name == "bin_bg_colour")
-                return QColor("#FAFAFA");
+                return QColor(0xFA, 0xFA, 0xFA);
             if(name == "reg_fg_colour")
-                return QColor("#000000");
+                return QColor(0x00, 0x00, 0x00);
             if(name == "reg_bg_colour")
-                return QColor("#FAFAFA");
+                return QColor(0xFA, 0xFA, 0xFA);
+            if(name == "formatted_fg_colour")
+                return QColor(0x00, 0x00, 0x00);
+            if(name == "formatted_bg_colour")
+                return QColor(0xFA, 0xFA, 0xFA);
             break;
         }
     }
@@ -526,8 +555,8 @@ QColor Settings::getDefaultColorValue(const std::string& group, const std::strin
                 backgroundColour = QColor(0x19, 0x23, 0x2D);
                 break;
             case LightStyle :
-                foregroundColour = QColor("#000000");
-                backgroundColour = QColor("#FAFAFA");
+                foregroundColour = QColor(0x00, 0x00, 0x00);
+                backgroundColour = QColor(0xFA, 0xFA, 0xFA);
                 break;
             }
             if(name == "foreground_colour")
@@ -600,7 +629,7 @@ void Settings::restoreDefaults ()
 
 void Settings::exportSettings(const QString& fileName)
 {
-    QSettings* exportSettings = new QSettings(fileName, QSettings::IniFormat);
+    QSettings exportSettings(fileName, QSettings::IniFormat);
 
     const QStringList groups = settings->childGroups();
     for(const QString& currentGroup : groups)
@@ -609,9 +638,9 @@ void Settings::exportSettings(const QString& fileName)
         const QStringList keys = settings->childKeys();
         for(const QString& currentKey : keys)
         {
-            exportSettings->beginGroup(currentGroup);
-            exportSettings->setValue(currentKey, getValue((currentGroup.toStdString()), (currentKey.toStdString())));
-            exportSettings->endGroup();
+            exportSettings.beginGroup(currentGroup);
+            exportSettings.setValue(currentKey, getValue((currentGroup.toStdString()), (currentKey.toStdString())));
+            exportSettings.endGroup();
         }
         settings->endGroup();
     }
@@ -622,20 +651,20 @@ bool Settings::importSettings(const QString& fileName)
     if(!isVaildSettingsFile(fileName))
         return false;
 
-    QSettings* importSettings = new QSettings(fileName, QSettings::IniFormat);
+    QSettings importSettings(fileName, QSettings::IniFormat);
 
-    const QStringList groups = importSettings->childGroups();
+    const QStringList groups = importSettings.childGroups();
     for(const QString& currentGroup : groups)
     {
-        importSettings->beginGroup(currentGroup);
-        const QStringList keys = importSettings->childKeys();
+        importSettings.beginGroup(currentGroup);
+        const QStringList keys = importSettings.childKeys();
         for(const QString& currentKey : keys)
         {
             settings->beginGroup(currentGroup);
-            settings->setValue(currentKey, importSettings->value(currentKey));
+            settings->setValue(currentKey, importSettings.value(currentKey));
             settings->endGroup();
         }
-        importSettings->endGroup();
+        importSettings.endGroup();
     }
 
     m_hCache.clear();
@@ -645,4 +674,12 @@ bool Settings::importSettings(const QString& fileName)
 void Settings::sync()
 {
     settings->sync();
+}
+
+QString Settings::systemLanguage()
+{
+    const QStringList uiLanguages = QLocale::system().uiLanguages();
+    if(uiLanguages.isEmpty())
+        return QLocale::system().name();
+    return QLocale(uiLanguages.first()).name();
 }

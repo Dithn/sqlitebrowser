@@ -15,7 +15,7 @@ QStringList FileDialog::getOpenFileNames(const FileDialogTypes dialogType, QWidg
     if(!result.isEmpty())
     {
         QFileInfo path = QFileInfo(result.first());
-        setFileDialogPath(dialogType, path.absolutePath());
+        setFileDialogPath(dialogType, path.absoluteFilePath());
     }
     return result;
 }
@@ -47,10 +47,15 @@ QString FileDialog::getFileDialogPath(const FileDialogTypes dialogType)
     case 0:     // Remember last location
     case 2: {   // Remember last location for current session only
         QHash<QString, QVariant> lastLocations = Settings::getValue("db", "lastlocations").toHash();
+        QString lastLocation = lastLocations[QString::number(static_cast<int>(dialogType))].toString();
 
-        return lastLocations[QString(dialogType)].toString();
+        // Without a remembered location, fall back to the home directory instead of
+        // letting Qt use the working directory (which is "/" for apps launched from Finder)
+        if(lastLocation.isEmpty())
+            return QDir::homePath();
+        return lastLocation;
     }
-    case 1:     // Always use this locations
+    case 1:     // Always use this location
         return Settings::getValue("db", "defaultlocation").toString();
     default:
         return QString();
@@ -62,7 +67,7 @@ void FileDialog::setFileDialogPath(const FileDialogTypes dialogType, const QStri
     QString dir = QFileInfo(new_path).absolutePath();
     QHash<QString, QVariant> lastLocations = Settings::getValue("db", "lastlocations").toHash();
 
-    lastLocations[QString(dialogType)] = dir;
+    lastLocations[QString::number(static_cast<int>(dialogType))] = dir;
 
     switch(Settings::getValue("db", "savedefaultlocation").toInt())
     {

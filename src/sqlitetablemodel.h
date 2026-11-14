@@ -35,6 +35,7 @@ public:
 
     /// returns logical amount of rows, whether currently cached or not
     int rowCount(const QModelIndex &parent = QModelIndex()) const override;
+    int realRowCount() const;
 
     int columnCount(const QModelIndex &parent = QModelIndex()) const override;
     size_t filterCount() const;
@@ -104,7 +105,7 @@ public:
     bool hasPseudoPk() const;
     std::vector<std::string> pseudoPk() const { return m_query.rowIdColumns(); }
 
-    sqlb::ForeignKeyClause getForeignKeyClause(size_t column) const;
+    std::shared_ptr<sqlb::ForeignKeyClause> getForeignKeyClause(size_t column) const;
 
     // This returns true if the model and, if set, the index can be edited. Not specifying the index parameter asks whether the model can
     // be edited in general (i.e. inserting and deleting rows as well as updating some cells). Specifying the index parameter asks whether
@@ -115,6 +116,9 @@ public:
     // When the index parameter is set, the same checks are performed but additionally the function checks whether this specific index
     // can be edited. This makes a difference for generated columns which are in (editable) tables but cannot be modified anyway.
     bool isEditable(const QModelIndex& index = QModelIndex()) const;
+
+    // Custom display format set?
+    bool hasDisplayFormat (const QModelIndex& index) const;
 
     // Conditional formats are of two kinds: regular conditional formats (including condition-free formats applying to any value in the
     // column) and formats applying to a particular row-id and which have always precedence over the first kind and whose filter apply
@@ -139,6 +143,9 @@ public:
 
     void reloadSettings();
 
+    bool hasError() const { return !m_lastError.isEmpty(); }
+    QString lastError() const { return m_lastError; }
+
 public slots:
     void updateFilter(const std::string& column, const QString& value);
     void updateGlobalFilter(const std::vector<QString>& values);
@@ -161,6 +168,7 @@ private:
 
     void handleFinishedFetch(int life_id, unsigned int fetched_row_begin, unsigned int fetched_row_end);
     void handleRowCountComplete(int life_id, int num_rows);
+    void handleError(int life_id, const QString& errMsg);
 
     void updateAndRunQuery();
 
@@ -188,6 +196,7 @@ private:
     /// the full row count, when the row-count query returns)
     RowCount m_rowCountAvailable;
     unsigned int m_currentRowCount;
+    unsigned int m_realRowCount;
 
     std::vector<std::string> m_headers;
 
@@ -228,12 +237,15 @@ private:
     QString m_blobText;
     QColor m_regFgColour;
     QColor m_regBgColour;
+    QColor m_formattedFgColour;
+    QColor m_formattedBgColour;
     QColor m_nullFgColour;
     QColor m_nullBgColour;
     QColor m_binFgColour;
     QColor m_binBgColour;
     QFont m_font;
     int m_symbolLimit;
+    int m_rowsLimit;
     bool m_imagePreviewEnabled;
 
     /**
@@ -245,6 +257,8 @@ private:
      * to that row count.
      */
     size_t m_chunkSize;
+
+    QString m_lastError;
 };
 
 #endif

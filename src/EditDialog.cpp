@@ -24,6 +24,7 @@
 #include <json.hpp>
 
 using json = nlohmann::json;
+using ordered_json = nlohmann::ordered_json;
 
 EditDialog::EditDialog(QWidget* parent)
     : QDialog(parent),
@@ -39,18 +40,25 @@ EditDialog::EditDialog(QWidget* parent)
     ui->buttonApply->setShortcut(QKeySequence(Qt::CTRL + Qt::Key_Return));
     ui->buttonApply->setToolTip(ui->buttonApply->toolTip() + " [" + ui->buttonApply->shortcut().toString(QKeySequence::NativeText) + "]");
 
-    QHBoxLayout* hexLayout = new QHBoxLayout(ui->editorBinary);
-    hexEdit = new QHexEdit(this);
-    hexLayout->addWidget(hexEdit);
-    hexEdit->setOverwriteMode(false);
-
-    QHBoxLayout* sciLayout = new QHBoxLayout(ui->editorSci);
+    // Text editor
     sciEdit = new DockTextEdit(this);
-    sciLayout->addWidget(sciEdit);
+    sciEdit->setWhatsThis(tr("The text editor modes let you edit plain text, as well as JSON or XML data with syntax highlighting, automatic formatting and validation before saving.\n\nErrors are indicated with a red squiggle underline.\n\nIn the Evaluation mode, entered SQLite expressions are evaluated and the result applied to the cell."));
+    ui->editorStack->insertWidget(TextEditor, sciEdit);
 
-    QHBoxLayout* imageLayout = new QHBoxLayout(ui->editorImage);
+    // Binary editor
+    hexEdit = new QHexEdit(this);
+    hexEdit->setOverwriteMode(false);
+    hexEdit->setContextMenuPolicy(Qt::ActionsContextMenu);
+    hexEdit->addAction(ui->actionPrint);
+    hexEdit->addAction(ui->actionCopyHexAscii);
+    ui->editorStack->insertWidget(HexEditor, hexEdit);
+
+    // Image editor
     imageEdit = new ImageViewer(this);
-    imageLayout->addWidget(imageEdit);
+    imageEdit->setContextMenuPolicy(Qt::ActionsContextMenu);
+    ui->editorStack->insertWidget(ImageEditor, imageEdit);
+
+    ui->editorStack->setCurrentIndex(0);
 
     QShortcut* ins = new QShortcut(QKeySequence(Qt::Key_Insert), this);
     connect(ins, &QShortcut::activated, this, &EditDialog::toggleOverwriteMode);
@@ -63,10 +71,6 @@ EditDialog::EditDialog(QWidget* parent)
     // Create shortcuts for the widgets that doesn't have its own print action or printing mechanism.
     QShortcut* shortcutPrint = new QShortcut(QKeySequence::Print, this, nullptr, nullptr, Qt::WidgetShortcut);
     connect(shortcutPrint, &QShortcut::activated, this, &EditDialog::openPrintDialog);
-
-    // Add actions to editors that have a context menu based on actions. This also activates the shortcuts.
-    ui->editorBinary->addAction(ui->actionPrint);
-    ui->editorBinary->addAction(ui->actionCopyHexAscii);
 
     // Set up popup menus
     QMenu* popupImportFileMenu = new QMenu(this);
@@ -92,38 +96,41 @@ EditDialog::EditDialog(QWidget* parent)
     });
     connect(ui->actionOpenInExternal, &QAction::triggered, this, &EditDialog::openDataWithExternal);
 
-    mustIndentAndCompact = Settings::getValue("databrowser", "indent_compact").toBool();
-    ui->actionIndent->setChecked(mustIndentAndCompact);
-
-    ui->buttonAutoSwitchMode->setChecked(Settings::getValue("databrowser", "auto_switch_mode").toBool());
-    ui->actionWordWrap->setChecked(Settings::getValue("databrowser", "editor_word_wrap").toBool());
-    setWordWrapping(ui->actionWordWrap->isChecked());
-
     reloadSettings();
 }
 
 EditDialog::~EditDialog()
 {
     Settings::setValue("databrowser", "indent_compact",  mustIndentAndCompact);
+    Settings::setValue("databrowser", "sort_keys", mustSortKeys);
     Settings::setValue("databrowser", "auto_switch_mode", ui->buttonAutoSwitchMode->isChecked());
     Settings::setValue("databrowser", "editor_word_wrap", ui->actionWordWrap->isChecked());
     delete ui;
 }
 
-void EditDialog::setCurrentIndex(const QModelIndex& idx)
+void EditDialog::promptSaveData()
 {
-    if (m_currentIndex != QPersistentModelIndex(idx) && ui->buttonApply->isEnabled() &&
-        (sciEdit->isModified() || ui->qtEdit->document()->isModified() || hexEdit->isModified())) {
+    if (m_currentIndex.isValid() && isModified()) {
 
         QMessageBox::StandardButton reply = QMessageBox::question(
             this,
             tr("Unsaved data in the cell editor"),
             tr("The cell editor contains data not yet applied to the database.\n"
-               "Do you want to apply the edited data?"),
-            QMessageBox::Apply | QMessageBox::Discard);
+               "Do you want to apply the edited data to row=%1, column=%2?")
+            .arg(m_currentIndex.row() + 1).arg(m_currentIndex.column()),
+            QMessageBox::Apply | QMessageBox::Discard, QMessageBox::Apply);
 
         if (reply == QMessageBox::Apply)
             accept();
+        else
+            reject();
+    }
+}
+
+void EditDialog::setCurrentIndex(const QModelIndex& idx)
+{
+    if (m_currentIndex != QPersistentModelIndex(idx)) {
+        promptSaveData();
     }
 
     setDisabled(!idx.isValid());
@@ -132,11 +139,27 @@ void EditDialog::setCurrentIndex(const QModelIndex& idx)
 
     QByteArray bArrData = idx.data(Qt::EditRole).toByteArray();
     loadData(bArrData);
+    if (idx.isValid()) {
+        ui->labelCell->setText(tr("Editing row=%1, column=%2")
+                               .arg(m_currentIndex.row() + 1).arg(m_currentIndex.column()));
+    } else {
+        ui->labelCell->setText(tr("No cell active."));
+    }
     updateCellInfoAndMode(bArrData);
 
-    ui->buttonApply->setDisabled(true);
-    sciEdit->setModified(false);
-    ui->qtEdit->document()->setModified(false);
+    setModified(false);
+}
+
+bool EditDialog::isModified() const
+{
+    return (sciEdit->isModified() || ui->qtEdit->document()->isModified());
+}
+
+void EditDialog::setModified(bool modified)
+{
+    ui->buttonApply->setEnabled(modified);
+    sciEdit->setModified(modified);
+    ui->qtEdit->document()->setModified(modified);
 }
 
 void EditDialog::showEvent(QShowEvent*)
@@ -154,7 +177,7 @@ void EditDialog::reject()
 {
     // We override this, to ensure the Escape key doesn't make the Edit Cell
     // dock go away
-    return;
+    setCurrentIndex(m_currentIndex);
 }
 
 // Loads data from a cell into the Edit Cell window
@@ -586,10 +609,13 @@ void EditDialog::accept()
 
             QString newData;
             bool proceed = true;
-            json jsonDoc;
+            ordered_json jsonDoc;
 
             try {
-                jsonDoc = json::parse(sciEdit->text().toStdString());
+                if (mustSortKeys)
+                  jsonDoc = json::parse(sciEdit->text().toStdString());
+                else
+                  jsonDoc = ordered_json::parse(sciEdit->text().toStdString());
             } catch(json::parse_error& parseError) {
                 sciEdit->setErrorIndicator(static_cast<int>(parseError.byte - 1));
 
@@ -621,7 +647,8 @@ void EditDialog::accept()
             QString errorMsg;
             int errorLine, errorColumn;
 
-            bool isValid = xmlDoc.setContent(sciEdit->text().toUtf8(), true, &errorMsg, &errorLine, &errorColumn);
+            // Don't process namespaces: QDomDocument would otherwise repeat the default xmlns declaration on every element
+            bool isValid = xmlDoc.setContent(sciEdit->text().toUtf8(), false, &errorMsg, &errorLine, &errorColumn);
             bool proceed;
 
             sciEdit->clearErrorIndicators();
@@ -663,6 +690,7 @@ void EditDialog::accept()
             // The data is different, so commit it back to the database
             emit recordTextUpdated(m_currentIndex, removedBom + newTextData.toUtf8(), false);
     }
+    setModified(false);
 }
 
 void EditDialog::setDataInBuffer(const QByteArray& bArrdata, DataSources source)
@@ -718,10 +746,14 @@ void EditDialog::setDataInBuffer(const QByteArray& bArrdata, DataSources source)
         {
             sciEdit->clearErrorIndicators();
 
-            json jsonDoc;
+            ordered_json jsonDoc;
 
             try {
+              if (mustSortKeys)
                 jsonDoc = json::parse(std::string(bArrdata.constData(), static_cast<size_t>(bArrdata.size())));
+              else
+                jsonDoc = ordered_json::parse(std::string(bArrdata.constData(), static_cast<size_t>(bArrdata.size())));
+                
             } catch(json::parse_error& parseError) {
                 sciEdit->setErrorIndicator(static_cast<int>(parseError.byte - 1));
             }
@@ -745,7 +777,8 @@ void EditDialog::setDataInBuffer(const QByteArray& bArrdata, DataSources source)
             QString errorMsg;
             int errorLine, errorColumn;
             QDomDocument xmlDoc;
-            bool isValid = xmlDoc.setContent(bArrdata, true, &errorMsg, &errorLine, &errorColumn);
+            // Don't process namespaces: QDomDocument would otherwise repeat the default xmlns declaration on every element
+            bool isValid = xmlDoc.setContent(bArrdata, false, &errorMsg, &errorLine, &errorColumn);
 
             if (mustIndentAndCompact && isValid) {
                 // Load indented XML into the XML editor
@@ -779,8 +812,9 @@ void EditDialog::setDataInBuffer(const QByteArray& bArrdata, DataSources source)
 void EditDialog::editModeChanged(int newMode)
 {
     ui->actionIndent->setEnabled(newMode == JsonEditor || newMode == XmlEditor);
+    ui->actionSortKeys->setEnabled(newMode == JsonEditor);
     setStackCurrentIndex(newMode);
-
+    
     // Change focus from the mode combo to the editor to start typing.
     if (ui->comboMode->hasFocus())
         setFocus();
@@ -888,18 +922,22 @@ void EditDialog::editTextChanged()
 
         // If data has been entered in the text editor, it can't be a NULL
         // any more. It hasn't been validated yet, so it cannot be JSON nor XML.
-        if (dataType == Null && isModified && dataLength != 0)
+        if (dataType == Null && isModified && dataLength != 0) {
             dataType = Text;
-
-        if (dataType != Null)
-            ui->labelType->setText(tr("Type of data currently in cell: Text / Numeric"));
-        ui->labelSize->setText(tr("%n character(s)", "", dataLength));
+            sciEdit->clearTextInMargin();
+        }
+        if (dataType == Null)
+            ui->labelInfo->setText(tr("Type: NULL; Size: 0 bytes"));
+        else
+            ui->labelInfo->setText(tr("Type: Text / Numeric; Size: %n character(s)", "", dataLength));
     }
 }
 
 void EditDialog::setMustIndentAndCompact(bool enable)
 {
     mustIndentAndCompact = enable;
+    
+    ui->actionSortKeys->setEnabled(enable);
 
     // Indent or compact if necessary. If data has changed (button Apply indicates so), reload from the widget, else from the table.
     if (ui->buttonApply->isEnabled()) {
@@ -907,6 +945,19 @@ void EditDialog::setMustIndentAndCompact(bool enable)
     } else
         setCurrentIndex(m_currentIndex);
 }
+
+void EditDialog::setMustSortKeys(bool enable)
+{
+  mustSortKeys = enable;
+  
+  // Must order the json keys. If data has changed (button Apply indicates so), reload from the widget, else from the table.
+  if (ui->buttonApply->isEnabled()) {
+    setDataInBuffer(sciEdit->text().toUtf8(), SciBuffer);
+  }
+  else
+    setCurrentIndex(m_currentIndex);
+}
+
 
 // Determine the type of data in the cell
 int EditDialog::checkDataType(const QByteArray& bArrdata) const
@@ -989,6 +1040,9 @@ void EditDialog::setFocus()
 // Sets or unsets read-only properties for the editors.
 void EditDialog::setReadOnly(bool ro)
 {
+    if (ro && !isReadOnly) {
+        promptSaveData();
+    }
     isReadOnly = ro;
 
     ui->buttonApply->setEnabled(!ro);
@@ -1050,15 +1104,16 @@ void EditDialog::updateCellInfoAndMode(const QByteArray& bArrdata)
         // Display the image format
         QString imageFormat = imageReader.format();
 
-        ui->labelType->setText(tr("Type of data currently in cell: %1 Image").arg(imageFormat.toUpper()));
-
         // Display the image dimensions and size
         QSize imageDimensions = imageReader.size();
         unsigned int imageSize = static_cast<unsigned int>(cellData.size());
 
-        QString labelSizeText = tr("%1x%2 pixel(s)").arg(imageDimensions.width()).arg(imageDimensions.height()) + ", " + humanReadableSize(imageSize);
+        QString labelInfoText = tr("Type: %1 Image; Size: %2x%3 pixel(s)")
+            .arg(imageFormat.toUpper())
+            .arg(imageDimensions.width()).arg(imageDimensions.height())
+            + ", " + humanReadableSize(imageSize);
 
-        ui->labelSize->setText(labelSizeText);
+        ui->labelInfo->setText(labelInfoText);
 
         return;
     }
@@ -1067,8 +1122,7 @@ void EditDialog::updateCellInfoAndMode(const QByteArray& bArrdata)
     switch (dataType) {
     case Null: {
         // NULL data type
-        ui->labelType->setText(tr("Type of data currently in cell: NULL"));
-        ui->labelSize->setText(tr("%n byte(s)", "", 0));
+        ui->labelInfo->setText(tr("Type: NULL; Size: 0 bytes"));
 
         // Use margin to set the NULL text.
         sciEdit->setTextInMargin(Settings::getValue("databrowser", "null_text").toString());
@@ -1080,16 +1134,14 @@ void EditDialog::updateCellInfoAndMode(const QByteArray& bArrdata)
         // Text only
         // Determine the length of the cell text in characters (possibly different to number of bytes).
         int textLength = QString(cellData).length();
-        ui->labelType->setText(tr("Type of data currently in cell: Text / Numeric"));
-        ui->labelSize->setText(tr("%n character(s)", "", textLength));
+        ui->labelInfo->setText(tr("Type: Text / Numeric; Size: %n character(s)", "", textLength));
         break;
     }
     case JSON: {
         // Valid JSON
         // Determine the length of the cell text in characters (possibly different to number of bytes).
         int jsonLength = QString(cellData).length();
-        ui->labelType->setText(tr("Type of data currently in cell: Valid JSON"));
-        ui->labelSize->setText(tr("%n character(s)", "", jsonLength));
+        ui->labelInfo->setText(tr("Type: Valid JSON; Size: %n character(s)", "", jsonLength));
         break;
     }
     default:
@@ -1097,14 +1149,21 @@ void EditDialog::updateCellInfoAndMode(const QByteArray& bArrdata)
         // Determine the length of the cell data
         int dataLength = cellData.length();
         // If none of the above data types, consider it general binary data
-        ui->labelType->setText(tr("Type of data currently in cell: Binary"));
-        ui->labelSize->setText(tr("%n byte(s)", "", dataLength));
+        ui->labelInfo->setText(tr("Type: Binary; Size: %n byte(s)", "", dataLength));
         break;
     }
 }
 
 void EditDialog::reloadSettings()
 {
+    mustIndentAndCompact = Settings::getValue("databrowser", "indent_compact").toBool();
+    ui->actionIndent->setChecked(mustIndentAndCompact);
+
+    mustSortKeys = Settings::getValue("databrowser", "sort_keys").toBool();
+    ui->actionSortKeys->setChecked(mustSortKeys);
+
+    ui->buttonAutoSwitchMode->setChecked(Settings::getValue("databrowser", "auto_switch_mode").toBool());
+
     // Set the (SQL) editor font for hex editor, since it needs a
     // Monospace font and the databrowser font would be usually of
     // variable width.
@@ -1121,6 +1180,9 @@ void EditDialog::reloadSettings()
                                             (Settings::getValue("General", "toolbarStyleEditCell").toInt()));
 
     sciEdit->reloadSettings();
+
+    ui->actionWordWrap->setChecked(Settings::getValue("databrowser", "editor_word_wrap").toBool());
+    setWordWrapping(ui->actionWordWrap->isChecked());
 }
 
 void EditDialog::setStackCurrentIndex(int editMode)

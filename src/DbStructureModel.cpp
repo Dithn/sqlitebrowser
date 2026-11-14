@@ -8,13 +8,19 @@
 #include <QMimeData>
 #include <QMessageBox>
 #include <QApplication>
+#include <QClipboard>
+#include <QRegularExpression>
 
-DbStructureModel::DbStructureModel(DBBrowserDB& db, QObject* parent)
+DbStructureModel::DbStructureModel(DBBrowserDB& db, QObject* parent,
+                                   bool dropSelectQuery,
+                                   bool dropInsert)
     : QAbstractItemModel(parent),
       m_db(db),
       browsablesRootItem(nullptr),
       m_dropQualifiedNames(false),
-      m_dropEnquotedNames(false)
+      m_dropEnquotedNames(false),
+      m_dropSelectQuery(dropSelectQuery),
+      m_dropInsert(dropInsert)
 {
     // Create root item and use its columns to store the header strings
     QStringList header;
@@ -49,8 +55,13 @@ QVariant DbStructureModel::data(const QModelIndex& index, int role) const
         // the position of the item in the tree.
         if(index.column() == ColumnName && item->parent() == browsablesRootItem)
             return QString::fromStdString(sqlb::ObjectIdentifier(item->text(ColumnSchema).toStdString(), item->text(ColumnName).toStdString()).toDisplayString());
+        else if(index.column() == ColumnSQL && Settings::getValue("db", "hideschemalinebreaks").toBool())
+        {
+            static const QRegularExpression lineBreaks("\\s*[\\r\\n]\\s*");
+            return item->text(index.column()).replace(lineBreaks, " ").trimmed();
+        }
         else
-            return Settings::getValue("db", "hideschemalinebreaks").toBool() ? item->text(index.column()).simplified() : item->text(index.column());
+            return item->text(index.column());
     case Qt::EditRole:
         return item->text(index.column());
     case Qt::ToolTipRole: {
@@ -209,7 +220,12 @@ QStringList DbStructureModel::mimeTypes() const
 QMimeData* DbStructureModel::mimeData(const QModelIndexList& indices) const
 {
     // We store the SQL data and the names data separately
-    QByteArray sqlData, namesData;
+    QByteArray sqlData, namesData, parametersData;
+
+    // For dropping SELECT queries, these variables take account of
+    // whether all objects are of the same type and belong to the same table.
+    QString objectTypeSet;
+    QString tableSet;
 
     // Loop through selected indices
     for(const QModelIndex& index : indices)
@@ -220,14 +236,38 @@ QMimeData* DbStructureModel::mimeData(const QModelIndexList& indices) const
         // Only export data for valid indices and only once per row (SQL column or Name column).
         if(index.isValid()) {
             QString objectType = data(index.sibling(index.row(), ColumnObjectType), Qt::DisplayRole).toString();
+            if (objectTypeSet.isEmpty() || objectTypeSet == objectType) {
+                objectTypeSet = objectType;
+            } else {
+                objectTypeSet = "*";
+            }
 
             // For names, export a (qualified) (escaped) identifier of the item for statement composition in SQL editor.
-            if(objectType == "field")
+            if(objectType == "field") {
                 namesData.append(getNameForDropping(item->text(ColumnSchema), item->parent()->text(ColumnName), item->text(ColumnName)).toUtf8());
-            else if(objectType == "database")
+                parametersData.append(QString("?" + item->text(ColumnName) + ", ").toUtf8());
+
+                QString table = getNameForDropping(item->text(ColumnSchema), item->parent()->text(ColumnName), "");
+                if (tableSet.isEmpty() || tableSet == table) {
+                    tableSet = table;
+                } else {
+                    tableSet = "*";
+                }
+            } else if(objectType == "table") {
+                QString table = getNameForDropping(item->text(ColumnSchema), item->text(ColumnName), "");
+                namesData.append(table.toUtf8());
+                if (tableSet.isEmpty() || tableSet == table) {
+                    tableSet = table;
+                } else {
+                    tableSet = "*";
+                }
+            } else if(objectType == "database") {
+                tableSet = "";
                 namesData.append(getNameForDropping(item->text(ColumnName), "", "").toUtf8());
-            else if(!objectType.isEmpty())
+            } else if(!objectType.isEmpty()) {
+                tableSet = "";
                 namesData.append(getNameForDropping(item->text(ColumnSchema), item->text(ColumnName), "").toUtf8());
+            }
 
             if(objectType != "field" && index.column() == ColumnSQL)
             {
@@ -249,7 +289,19 @@ QMimeData* DbStructureModel::mimeData(const QModelIndexList& indices) const
                         {
                             QString insertStatement = "INSERT INTO " + QString::fromStdString(objid.toString()) + " VALUES(";
                             for(int j=1; j < tableModel.columnCount(); ++j)
-                                insertStatement += QString("'%1',").arg(tableModel.data(tableModel.index(i, j), Qt::EditRole).toString());
+                            {
+                                // Write each value as a SQL literal, the same way "Copy as SQL" in the table grid does
+                                const QModelIndex cell = tableModel.index(i, j);
+                                const QVariant value = tableModel.data(cell, Qt::EditRole);
+                                if(value.isNull())
+                                    insertStatement += "NULL,";
+                                else if(tableModel.isBinary(cell))
+                                    insertStatement += QString("X'%1',").arg(QString(value.toByteArray().toHex()));
+                                else if(value.type() == QVariant::LongLong || value.type() == QVariant::Double)
+                                    insertStatement += value.toString() + ",";
+                                else
+                                    insertStatement += sqlb::escapeString(value.toString()) + ",";
+                            }
                             insertStatement.chop(1);
                             insertStatement += ");\n";
                             sqlData.append(insertStatement.toUtf8());
@@ -271,10 +323,39 @@ QMimeData* DbStructureModel::mimeData(const QModelIndexList& indices) const
         else if (namesData.endsWith("."))
             namesData.chop(1);
 
+        if (parametersData.endsWith(", "))
+            parametersData.chop(2);
+        else if (parametersData.endsWith("."))
+            parametersData.chop(1);
+
+        if (tableSet.endsWith("."))
+            tableSet.chop(1);
+
+        if (!tableSet.isEmpty() && tableSet != "*" && !objectTypeSet.isEmpty()) {
+            if (m_dropSelectQuery) {
+                if (objectTypeSet == "field") {
+                    namesData = ("SELECT " + QString::fromUtf8(namesData) + " FROM " + tableSet + ";\n").toUtf8();
+                } else if (objectTypeSet == "table") {
+                    namesData = ("SELECT * FROM " + tableSet + ";").toUtf8();
+                }
+            } else if (m_dropInsert) {
+                if (objectTypeSet == "field") {
+                    namesData = ("INSERT INTO " + tableSet + " (" + QString::fromUtf8(namesData) + ") VALUES (" + parametersData + ");\n").toUtf8();
+                } else if (objectTypeSet == "table") {
+                    namesData = ("INSERT INTO " + tableSet + " DEFAULT VALUES;\n").toUtf8();
+                }
+            }
+        }
         mime->setData("text/plain", namesData);
     } else
         mime->setData("text/plain", sqlData);
     return mime;
+}
+
+void DbStructureModel::copy(const QModelIndexList& indices) const
+{
+    QMimeData *mimeData = DbStructureModel::mimeData(indices);
+    qApp->clipboard()->setMimeData(mimeData);
 }
 
 bool DbStructureModel::dropMimeData(const QMimeData* data, Qt::DropAction action, int, int, const QModelIndex&)
@@ -334,18 +415,18 @@ void DbStructureModel::buildTree(QTreeWidgetItem* parent, const std::string& sch
         // Add an extra node for the browsable section
         addNode(schema, obj.second->name(), obj.second->isView() ? "view" : "table", obj.second->originalSql(), browsablesRootItem);
 
-        sqlb::StringVector pk_columns;
+        sqlb::IndexedColumnVector pk_columns;
         if(!obj.second->isView())
         {
             const auto pk = obj.second->primaryKey();
             if(pk)
-                pk_columns = pk->columnList();
+                pk_columns = obj.second->primaryKeyColumns();
         }
 
         for(const auto& field : obj.second->fields)
         {
             bool isPK = contains(pk_columns, field.name());
-            bool isFK = obj.second->constraint({field.name()}, sqlb::Constraint::ForeignKeyConstraintType) != nullptr;
+            bool isFK = obj.second->foreignKey({field.name()}) != nullptr;
 
             addNode(schema, field.name(), "field", field.toString("  ", " "), item, field.type(), isPK ? "_key" : (isFK ? "_fk" : std::string{}));
         }

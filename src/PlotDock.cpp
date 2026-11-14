@@ -1,3 +1,5 @@
+#define QT_NO_FLOAT16_OPERATORS     // This works around https://bugreports.qt.io/browse/QTBUG-72073 which makes the build fail on MSVC 2017 and Qt 5.12
+
 #include "PlotDock.h"
 #include "ui_PlotDock.h"
 #include "Settings.h"
@@ -7,6 +9,8 @@
 
 #include <QPrinter>
 #include <QPrintPreviewDialog>
+#include <QDesktopServices>
+#include <QUrl>
 #if QT_VERSION >= QT_VERSION_CHECK(5, 10, 0)
 #include <QRandomGenerator>
 #endif
@@ -18,6 +22,9 @@
 #ifdef LOAD_DATA_BENCHMARK
 #include <QElapsedTimer>
 #endif
+
+#include <QMouseEvent>
+#include <QLocale>
 
 static int random_number(int from, int to)
 {
@@ -35,7 +42,10 @@ PlotDock::PlotDock(QWidget* parent)
       m_currentTableSettings(nullptr),
       m_showLegend(false),
       m_stackedBars(false),
-      m_fixedFormat(false)
+      m_fixedFormat(false),
+      m_logScaleX(false),
+      m_logScaleY(false),
+      m_xtype(QVariant::Invalid)
 {
     ui->setupUi(this);
 
@@ -48,12 +58,12 @@ PlotDock::PlotDock(QWidget* parent)
     ui->comboPointShape->setCurrentIndex(Settings::getValue("PlotDock", "pointShape").toInt());
 
     // Connect signals
-    connect(ui->treePlotColumns, &QTreeWidget::itemChanged, this, &PlotDock::on_treePlotColumns_itemChanged);
     connect(ui->plotWidget, &QCustomPlot::selectionChangedByUser, this, &PlotDock::selectionChanged);
 
     // connect slots that takes care that when an axis is selected, only that direction can be dragged and zoomed:
     connect(ui->plotWidget, &QCustomPlot::mousePress, this, &PlotDock::mousePress);
     connect(ui->plotWidget, &QCustomPlot::mouseWheel, this, &PlotDock::mouseWheel);
+    connect(ui->plotWidget, &QCustomPlot::mouseMove, this, &PlotDock::mouseMove);
 
     // Enable: click on items to select them, Ctrl+Click for multi-selection, mouse-wheel for zooming and mouse drag for
     // changing the visible range.
@@ -86,6 +96,12 @@ PlotDock::PlotDock(QWidget* parent)
        openPrintDialog();
     });
 
+    QAction* helpAction = new QAction(QIcon(":/icons/whatis"), tr("Help"), m_contextMenu);
+    m_contextMenu->addAction(helpAction);
+    connect(helpAction, &QAction::triggered, this, [&]() {
+        QDesktopServices::openUrl(QUrl("https://github.com/sqlitebrowser/sqlitebrowser/wiki/Plot-Dock"));
+    });
+
     QAction* showLegendAction = new QAction(tr("Show legend"), m_contextMenu);
     showLegendAction->setCheckable(true);
     m_contextMenu->addAction(showLegendAction);
@@ -101,12 +117,32 @@ PlotDock::PlotDock(QWidget* parent)
     QAction* fixedFormatsAction = new QAction(tr("Fixed number format"), m_contextMenu);
     fixedFormatsAction->setCheckable(true);
     m_contextMenu->addAction(fixedFormatsAction);
-
+    
     connect(fixedFormatsAction, &QAction::toggled, this,
-      [=](bool fixed) {
-          m_fixedFormat = fixed;
-          adjustAxisFormat();
-          ui->plotWidget->replot();
+    [=](bool fixed) {
+        m_fixedFormat = fixed;
+        adjustAxisFormat();
+        ui->plotWidget->replot();
+    });
+
+   QAction* logScaleXAction = new QAction(tr("Logarithmic scale (X)"), m_contextMenu);
+    logScaleXAction->setCheckable(true);
+    m_contextMenu->addAction(logScaleXAction);
+
+    connect(logScaleXAction, &QAction::toggled, this, [=](bool log) {
+        m_logScaleX = log;
+        updateLogScale();
+        ui->plotWidget->replot();
+    });
+
+    QAction* logScaleYAction = new QAction(tr("Logarithmic scale (Y)"), m_contextMenu);
+    logScaleYAction->setCheckable(true);
+    m_contextMenu->addAction(logScaleYAction);
+
+    connect(logScaleYAction, &QAction::toggled, this, [=](bool log) {
+        m_logScaleY = log;
+        updateLogScale();
+        ui->plotWidget->replot();
     });
 
     connect(ui->plotWidget, &QTableView::customContextMenuRequested, this,
@@ -299,12 +335,12 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
         // regain the model column index and the datatype
         // right now datatype is only important for X axis (Y is always numeric)
         int x = xitem->data(PlotColumnField, Qt::UserRole).toInt();
-        unsigned int xtype = xitem->data(PlotColumnType, Qt::UserRole).toUInt();
+        m_xtype = xitem->data(PlotColumnType, Qt::UserRole).toUInt();
 
         ui->plotWidget->xAxis->setTickLabelRotation(0);
 
         // check if we have a x axis with datetime data
-        switch (xtype) {
+        switch (m_xtype) {
         case QVariant::Date: {
             QSharedPointer<QCPAxisTickerDateTime> ticker(new QCPAxisTickerDateTime);
             ticker->setDateTimeFormat("yyyy-MM-dd");
@@ -378,7 +414,7 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
                         // NULL values produce gaps in the linear graphs. We use NaN values in
                         // that case as required by QCustomPlot.
                         // Bar plots will display the configured string for NULL values.
-                        if(xtype == QVariant::String) {
+                        if(m_xtype == QVariant::String) {
                             xdata[j] = j+1;
                             labels << model->data(model->index(j, x), Qt::DisplayRole).toString();
                         } else
@@ -386,7 +422,7 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
                     } else {
 
                         // convert x type axis if it's datetime
-                        switch (xtype) {
+                        switch (m_xtype) {
                         case QVariant::DateTime:
                         case QVariant::Date: {
                             QString s = model->data(model->index(j, x)).toString();
@@ -440,8 +476,8 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
                 }
 
                 // Line type and point shape are not supported by the String X type (Bars)
-                ui->comboLineType->setEnabled(xtype != QVariant::String);
-                ui->comboPointShape->setEnabled(xtype != QVariant::String);
+                ui->comboLineType->setEnabled(m_xtype != QVariant::String);
+                ui->comboPointShape->setEnabled(m_xtype != QVariant::String);
 
                 // WARN: ssDot is removed
                 int shapeIdx = ui->comboPointShape->currentIndex();
@@ -454,7 +490,7 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
                 // When it is not sorted by x, we draw a curve, so the order selected by the user in the table or in the query is
                 // respected.  In this case the line will have loops and only None and Line is supported as line style.
                 // TODO: how to make the user aware of this without disturbing.
-                if (xtype == QVariant::String) {
+                if (m_xtype == QVariant::String) {
 
                     for(size_t y_ind = 0; y_ind < 2; y_ind++)
                     {
@@ -530,6 +566,7 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
         }
 
         ui->plotWidget->rescaleAxes(true);
+        updateLogScale();
         ui->plotWidget->legend->setVisible(m_showLegend);
         // Legend with slightly transparent background brush:
         ui->plotWidget->legend->setBrush(QColor(255, 255, 255, 150));
@@ -573,7 +610,7 @@ void PlotDock::resetPlot()
     updatePlot(nullptr);
 }
 
-void PlotDock::on_treePlotColumns_itemChanged(QTreeWidgetItem* changeitem, int column)
+void PlotDock::columnItemChanged(QTreeWidgetItem* changeitem, int column)
 {
     // disable change updates, or we get unwanted redrawing and weird behavior
     ui->treePlotColumns->blockSignals(true);
@@ -639,7 +676,7 @@ void PlotDock::on_treePlotColumns_itemChanged(QTreeWidgetItem* changeitem, int c
     updatePlot(m_currentPlotModel, m_currentTableSettings, false);
 }
 
-void PlotDock::on_treePlotColumns_itemDoubleClicked(QTreeWidgetItem* item, int column)
+void PlotDock::columnItemDoubleClicked(QTreeWidgetItem* item, int column)
 {
     // disable change updates, or we get unwanted redrawing and weird behavior
     ui->treePlotColumns->blockSignals(true);
@@ -684,7 +721,7 @@ void PlotDock::on_treePlotColumns_itemDoubleClicked(QTreeWidgetItem* item, int c
     updatePlot(m_currentPlotModel, m_currentTableSettings, false);
 }
 
-void PlotDock::on_butSavePlot_clicked()
+void PlotDock::savePlot()
 {
     QString fileName = FileDialog::getSaveFileName(
                            CreateDataFile,
@@ -717,7 +754,7 @@ void PlotDock::on_butSavePlot_clicked()
     }
 }
 
-void PlotDock::on_comboLineType_currentIndexChanged(int index)
+void PlotDock::lineTypeChanged(int index)
 {
     Q_ASSERT(index >= QCPGraph::lsNone &&
              index <= QCPGraph::lsImpulse);
@@ -760,7 +797,7 @@ void PlotDock::on_comboLineType_currentIndexChanged(int index)
     }
 }
 
-void PlotDock::on_comboPointShape_currentIndexChanged(int index)
+void PlotDock::pointShapeChanged(int index)
 {
     // WARN: because ssDot point shape is removed
     if (index > 0) index += 1;
@@ -904,6 +941,34 @@ void PlotDock::mousePress()
     }
 }
 
+void PlotDock::mouseMove(QMouseEvent* event)
+{
+    double x = ui->plotWidget->xAxis->pixelToCoord(event->pos().x());
+    double y = ui->plotWidget->yAxis->pixelToCoord(event->pos().y());
+
+    QString xLabel;
+
+    switch (m_xtype) {
+    case QVariant::Date:
+        xLabel = QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(x*1000.0)).toString("yyyy-MM-dd, ");
+        break;
+    case QVariant::Time:
+        xLabel = QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(x*1000.0), Qt::UTC).toString("hh:mm:ss, ");
+        break;
+    case QVariant::DateTime:
+        xLabel = QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(x*1000.0)).toString("yyyy-MM-dd hh:mm:ss, ");
+        break;
+    case QVariant::String:
+        // In this case, only the y value is displayed
+        xLabel = QString("y=");
+        break;
+    default:
+        xLabel = QLocale().toString(x) + ", ";
+    }
+
+    ui->plotWidget->setToolTip(xLabel + QLocale().toString(y));
+}
+
 void PlotDock::mouseWheel()
 {
     // Allow user to reset the plot
@@ -986,19 +1051,56 @@ void PlotDock::adjustBars()
     }
 }
 
-void PlotDock::adjustAxisFormat()
-{
-    const QString format = m_fixedFormat? "f" : "gb";
-    ui->plotWidget->xAxis->setNumberFormat(format);
-    ui->plotWidget->yAxis->setNumberFormat(format);
-    ui->plotWidget->yAxis2->setNumberFormat(format);
-
-    const int precision = m_fixedFormat? 0 : 6;
-    ui->plotWidget->xAxis->setNumberPrecision(precision);
-    ui->plotWidget->yAxis->setNumberPrecision(precision);
-    ui->plotWidget->yAxis2->setNumberPrecision(precision);
+namespace {
+    void adjustOneAxisFormat (QCPAxis* axis, bool fixedFormat) {
+        const QString format = fixedFormat? "f" : "gb";
+        axis->setNumberFormat(format);
+        int precision;
+        // Different values for big numbers and small numbers.
+        if (axis->range().center() > 999 && axis->range().size() > 10)
+            precision = fixedFormat? 0 : 2;
+        else
+            precision = fixedFormat? 2 : 6;
+        axis->setNumberPrecision(precision);
+    }
 }
 
+void PlotDock::adjustAxisFormat()
+{
+    adjustOneAxisFormat(ui->plotWidget->xAxis, m_fixedFormat);
+    adjustOneAxisFormat(ui->plotWidget->yAxis, m_fixedFormat);
+    adjustOneAxisFormat(ui->plotWidget->yAxis2, m_fixedFormat);
+}
+void PlotDock::updateLogScale()
+{
+    // Set scale type for X axis
+    ui->plotWidget->xAxis->setScaleType(
+        m_logScaleX ? QCPAxis::stLogarithmic : QCPAxis::stLinear);
+    ui->plotWidget->xAxis->setTicker(m_logScaleX
+        ? QSharedPointer<QCPAxisTicker>(new QCPAxisTickerLog)
+        : QSharedPointer<QCPAxisTicker>(new QCPAxisTicker));
+
+    // Set scale type for both Y axes
+    yAxes[0]->setScaleType(
+        m_logScaleY ? QCPAxis::stLogarithmic : QCPAxis::stLinear);
+    yAxes[0]->setTicker(m_logScaleY
+        ? QSharedPointer<QCPAxisTicker>(new QCPAxisTickerLog)
+        : QSharedPointer<QCPAxisTicker>(new QCPAxisTicker));
+
+    yAxes[1]->setScaleType(
+        m_logScaleY ? QCPAxis::stLogarithmic : QCPAxis::stLinear);
+    yAxes[1]->setTicker(m_logScaleY
+        ? QSharedPointer<QCPAxisTicker>(new QCPAxisTickerLog)
+        : QSharedPointer<QCPAxisTicker>(new QCPAxisTicker));
+
+    // Log scale breaks on zero/negative values — clamp range minimum to small positive
+    if(m_logScaleX && ui->plotWidget->xAxis->range().lower <= 0)
+        ui->plotWidget->xAxis->setRangeLower(1e-3);
+    if(m_logScaleY && yAxes[0]->range().lower <= 0)
+        yAxes[0]->setRangeLower(1e-3);
+    if(m_logScaleY && yAxes[1]->range().lower <= 0)
+        yAxes[1]->setRangeLower(1e-3);
+}
 void PlotDock::toggleStackedBars(bool stacked)
 {
     m_stackedBars = stacked;

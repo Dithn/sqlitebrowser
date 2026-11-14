@@ -1,71 +1,147 @@
-name: C/C++ CI
+name: CI
 
 on:
   push:
-    branches: ['*']
-    tags:
-    paths_ignore: ['docs/**', '.travis.yml']
+    branches: [master]
   pull_request:
-  release:
-    types: ['created']
+  schedule:
+    - cron: "0 0 * * *"  # Every day at midnight UTC
+  workflow_dispatch:
+    inputs:
+      NIGHTLY:
+        description: "Run as a nightly build"
+        default: false
+        required: true
+        type: boolean
 
-defaults:
-  run:
-    shell: bash
+run-name: >-
+  ${{
+    (github.event_name == 'schedule' || inputs.NIGHTLY == true)
+      && 'Build and Deploy Nightly Builds'
+      || github.event.pull_request.title
+      || github.event.head_commit.message
+      || format('{0} on {1}', github.workflow, github.ref_name)
+  }}
 
 jobs:
-  build:
-    name: ${{ matrix.config.name }}
-    runs-on: ${{ matrix.config.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-        - {name: "ubuntu-20.04", os: "ubuntu-20.04"}
-
+  check-skippable:
+    name: Check Skippable
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      skip: ${{ steps.set-skippable.outputs.skippable || 'false' }}
     steps:
-    - uses: actions/checkout@v2
-    - name: Install dependencies
-      run: |
-           sudo apt-get update
-           sudo apt-get install qttools5-dev libqt5scintilla2-dev libqcustomplot-dev libsqlite3-dev
-    - name: Configure CMake
-      run: |
-           cmake --version
-           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_INSTALL_PREFIX=${PWD}/install \
-                -DCPACK_PACKAGE_DIRECTORY=${PWD}/package \
-                -DENABLE_TESTING=ON
-    - name: make
-      run: cmake --build build --config Release -j --target install
-    - name: run tests
-      run: ctest -C Release
-    - name: package
-      run: |
-           cmake --build build --config Release -j --target package
-           cmake -E remove_directory package/_CPack_Packages
-    - name: upload package
-      uses: actions/upload-artifact@master
-      with:
-        name: pkg-${{ matrix.config.name }}
-        path: package
-    - name: upload to release page
-      if: github.event_name == 'release'
-      env:
-        TOKEN: "token ${{ secrets.GITHUB_TOKEN }}"
-        TAG: ${{ github.event.release.tag_name }}
-        UPLOAD_URL: ${{ github.event.release.upload_url }}
-      run: |
-              # Do try this at home! The REST API is documented at
-              # https://docs.github.com/en/free-pro-team@latest/rest and you can get a personal
-              # access token at https://github.com/settings/tokens
-              # (set TOKEN to "bearer abcdef1234")
-              # you can get the UPLOAD_URL with a short bash snippet; make sure to set the env var TAG:
-              # UPLOAD_URL=$(curl -H 'Accept: application/vnd.github.v3+json' $GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$TAG | jq -r .upload_url)
-              UPLOAD_URL=${UPLOAD_URL%\{*} # remove "{name,label}" suffix
-              for pkg in package/*.*; do
-                NAME=$(basename $pkg)
-                MIME=$(file --mime-type $pkg|cut -d ' ' -f2)
-                curl -X POST -H "Accept: application/vnd.github.v3+json" -H "Authorization: $TOKEN" -H "Content-Type: $MIME" --data-binary @$pkg $UPLOAD_URL?name=$NAME
-              done
+      - uses: actions/checkout@v7
 
+      - name: Check and set skippable
+        id: set-skippable
+        continue-on-error: true
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            git fetch origin tag nightly
+            LAST_COMMIT_HASH=$(git rev-list -n 1 nightly)
+            if [ "$(git rev-parse HEAD)" = "$LAST_COMMIT_HASH" ]; then
+              echo "::notice::No new commits since last nightly build, skipping this build."
+              echo "skippable=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "skippable=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-macos:
+    needs: check-skippable
+    if: needs.check-skippable.outputs.skip != 'true'
+    permissions:
+      actions: read
+      contents: write
+    uses: ./.github/workflows/cppcmake-macos.yml
+    secrets: inherit
+    with:
+      NIGHTLY: ${{ github.event_name == 'schedule' || inputs.NIGHTLY == true }}
+      CONSOLIDATE_DEPENDENCY_SUMMARY: true
+
+  build-ubuntu:
+    needs: check-skippable
+    if: needs.check-skippable.outputs.skip != 'true'
+    permissions:
+      actions: read
+      contents: write
+    uses: ./.github/workflows/cppcmake-ubuntu.yml
+    with:
+      NIGHTLY: ${{ github.event_name == 'schedule' || inputs.NIGHTLY == true }}
+      CONSOLIDATE_DEPENDENCY_SUMMARY: true
+
+  build-windows:
+    needs: check-skippable
+    if: needs.check-skippable.outputs.skip != 'true'
+    permissions:
+      actions: read
+      contents: write
+    uses: ./.github/workflows/cppcmake-windows.yml
+    secrets: inherit
+    with:
+      NIGHTLY: ${{ github.event_name == 'schedule' || inputs.NIGHTLY == true }}
+      CONSOLIDATE_DEPENDENCY_SUMMARY: true
+
+  build-windows_on_arm:
+    needs: check-skippable
+    if: needs.check-skippable.outputs.skip != 'true'
+    permissions:
+      actions: read
+      contents: write
+    uses: ./.github/workflows/cppcmake-windows_on_arm.yml
+    secrets: inherit
+    with:
+      NIGHTLY: ${{ github.event_name == 'schedule' || inputs.NIGHTLY == true }}
+      CONSOLIDATE_DEPENDENCY_SUMMARY: true
+
+  summarize-dependencies:
+    needs:
+      [
+        check-skippable,
+        build-macos,
+        build-ubuntu,
+        build-windows,
+        build-windows_on_arm,
+      ]
+    if: always() && needs.check-skippable.outputs.skip != 'true' && !cancelled()
+    name: Summarize Dependencies
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download dependency summaries
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: dependency-summary-*
+          path: dependency-summary
+          merge-multiple: true
+
+      - name: Summary
+        run: |
+          {
+            echo "## Dependencies used"
+            echo ""
+            echo "| Workflow | Target | OpenSSL | Qt | SQLCipher | SQLite |"
+            echo "| :---: | :---: | :---: | :---: | :---: | :---: |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -d dependency-summary ] && find dependency-summary -type f -name '*.md' | grep -q .; then
+            find dependency-summary -type f -name '*.md' -print | sort | while IFS= read -r file; do
+              cat "$file" >> "$GITHUB_STEP_SUMMARY"
+            done
+          else
+            echo "| Not available | No dependency summaries were uploaded. | - | - | - | - |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  release:
+    if: github.event_name != 'pull_request'
+    needs: [build-macos, build-ubuntu, build-windows, build-windows_on_arm]
+    name: Release
+    permissions:
+      actions: read
+      contents: write
+    uses: ./.github/workflows/release.yml

@@ -30,7 +30,7 @@ void TestTable::sqlOutput()
     tt.fields.push_back(f);
     tt.fields.emplace_back("car", "text");
     tt.fields.push_back(fkm);
-    tt.addConstraint(ConstraintPtr(new PrimaryKeyConstraint({f.name(), fkm.name()})));
+    tt.addConstraint({f.name(), fkm.name()}, std::make_shared<PrimaryKeyConstraint>());
 
     QCOMPARE(tt.sql(), "CREATE TABLE \"testtable\" (\n"
                        "\t\"id\"\tinteger,\n"
@@ -48,7 +48,7 @@ void TestTable::sqlGraveAccentOutput()
     tt.fields.push_back(f);
     tt.fields.emplace_back("car", "text");
     tt.fields.push_back(fkm);
-    tt.addConstraint(ConstraintPtr(new PrimaryKeyConstraint({f.name(), fkm.name()})));
+    tt.addConstraint({f.name(), fkm.name()}, std::make_shared<PrimaryKeyConstraint>());
     sqlb::setIdentifierQuoting(sqlb::GraveAccents);
 
     QCOMPARE(tt.sql(), "CREATE TABLE `testtable` (\n"
@@ -70,7 +70,7 @@ void TestTable::sqlSquareBracketsOutput()
     tt.fields.push_back(f);
     tt.fields.emplace_back("car", "text");
     tt.fields.push_back(fkm);
-    tt.addConstraint(ConstraintPtr(new PrimaryKeyConstraint({f.name(), fkm.name()})));
+    tt.addConstraint({f.name(), fkm.name()}, std::make_shared<PrimaryKeyConstraint>());
     sqlb::setIdentifierQuoting(sqlb::SquareBrackets);
 
     QCOMPARE(tt.sql(), "CREATE TABLE [testtable] (\n"
@@ -91,9 +91,9 @@ void TestTable::autoincrement()
     tt.fields.push_back(f);
     tt.fields.emplace_back("car", "text");
     tt.fields.push_back(fkm);
-    PrimaryKeyConstraint pk({f.name()});
+    PrimaryKeyConstraint pk;
     pk.setAutoIncrement(true);
-    tt.addConstraint(ConstraintPtr(new PrimaryKeyConstraint(pk)));
+    tt.addConstraint({f.name()}, std::make_shared<PrimaryKeyConstraint>(pk));
 
     QCOMPARE(tt.sql(), "CREATE TABLE \"testtable\" (\n"
                        "\t\"id\"\tinteger,\n"
@@ -111,9 +111,9 @@ void TestTable::notnull()
     tt.fields.push_back(f);
     tt.fields.emplace_back("car", "text", true);
     tt.fields.push_back(fkm);
-    PrimaryKeyConstraint pk({f.name()});
+    PrimaryKeyConstraint pk;
     pk.setAutoIncrement(true);
-    tt.addConstraint(ConstraintPtr(new PrimaryKeyConstraint(pk)));
+    tt.addConstraint({f.name()}, std::make_shared<PrimaryKeyConstraint>(pk));
 
     QCOMPARE(tt.sql(), "CREATE TABLE \"testtable\" (\n"
                        "\t\"id\"\tinteger,\n"
@@ -130,7 +130,7 @@ void TestTable::withoutRowid()
     tt.fields.push_back(f);
     tt.fields.emplace_back("b", "integer");
     tt.setWithoutRowidTable(true);
-    tt.addConstraint(ConstraintPtr(new PrimaryKeyConstraint({f.name()})));
+    tt.addConstraint({f.name()}, std::make_shared<PrimaryKeyConstraint>());
 
     QCOMPARE(tt.sql(), "CREATE TABLE \"testtable\" (\n"
                        "\t\"a\"\tinteger,\n"
@@ -160,7 +160,7 @@ void TestTable::strictAndWithoutRowid()
     tt.fields.emplace_back("b", "integer");
     tt.setStrict(true);
     tt.setWithoutRowidTable(true);
-    tt.addConstraint(ConstraintPtr(new PrimaryKeyConstraint({f.name()})));
+    tt.addConstraint({f.name()}, std::make_shared<PrimaryKeyConstraint>());
 
     QCOMPARE(tt.sql(), "CREATE TABLE \"testtable\" (\n"
                        "\t\"a\"\tinteger,\n"
@@ -174,14 +174,42 @@ void TestTable::foreignKeys()
     Table tt("testtable");
     Field f("a", "integer");
     tt.fields.push_back(f);
-    sqlb::ConstraintPtr fk = sqlb::ConstraintPtr(new sqlb::ForeignKeyClause("b", sqlb::StringVector{"c"}));
-    fk->setColumnList({f.name()});
-    tt.addConstraint(fk);
+    auto fk = std::make_shared<sqlb::ForeignKeyClause>("b", sqlb::StringVector{"c"});
+    tt.addConstraint({f.name()}, fk);
 
     QCOMPARE(tt.sql(), "CREATE TABLE \"testtable\" (\n"
                        "\t\"a\"\tinteger,\n"
                        "\tFOREIGN KEY(\"a\") REFERENCES \"b\"(\"c\")\n"
                        ");");
+}
+
+void TestTable::addAndRemoveKeyInConstraint()
+{
+    Table tt("testtable");
+    tt.fields.emplace_back("a", "integer");
+    tt.fields.emplace_back("b", "integer");
+    tt.fields.emplace_back("c", "integer");
+    auto pk = std::make_shared<PrimaryKeyConstraint>();
+    tt.addConstraint({std::string("a")}, pk);
+
+    // Extending the key sorts the updated entry behind the old one. This used to loop forever.
+    tt.addKeyToConstraint(pk, "b");
+    tt.addKeyToConstraint(pk, "c");
+    QCOMPARE(tt.primaryKeyColumns().size(), size_t(3));
+    QCOMPARE(tt.indexConstraints().size(), size_t(1));
+    QVERIFY(tt.sql().find("PRIMARY KEY(\"a\",\"b\",\"c\")") != std::string::npos);
+
+    // Removing the first key column sorts the updated entry behind the old one, too
+    tt.removeKeyFromConstraint(pk, "a");
+    QCOMPARE(tt.primaryKeyColumns().size(), size_t(2));
+    QCOMPARE(tt.indexConstraints().size(), size_t(1));
+    QVERIFY(tt.sql().find("PRIMARY KEY(\"b\",\"c\")") != std::string::npos);
+
+    // Removing the last remaining keys removes the constraint
+    tt.removeKeyFromConstraint(pk, "b");
+    tt.removeKeyFromConstraint(pk, "c");
+    QVERIFY(!tt.primaryKey());
+    QCOMPARE(tt.indexConstraints().size(), size_t(0));
 }
 
 void TestTable::uniqueConstraint()
@@ -194,7 +222,7 @@ void TestTable::uniqueConstraint()
     tt.fields.push_back(f1);
     tt.fields.push_back(f2);
     tt.fields.push_back(f3);
-    tt.addConstraint(sqlb::ConstraintPtr(new sqlb::UniqueConstraint({f2.name(), f3.name()})));
+    tt.addConstraint({f2.name(), f3.name()}, std::make_shared<sqlb::UniqueConstraint>());
 
     QCOMPARE(tt.sql(), "CREATE TABLE \"testtable\" (\n"
                        "\t\"a\"\tinteger UNIQUE,\n"
@@ -225,9 +253,10 @@ void TestTable::parseSQL()
     QCOMPARE(tab.fields.at(2).type(), "VARCHAR(255)");
 
     auto pk = tab.primaryKey();
+    auto pkColumns = tab.primaryKeyColumns();
     QVERIFY(pk->autoIncrement());
-    QCOMPARE(pk->columnList().size(), 1);
-    QCOMPARE(pk->columnList().at(0), tab.fields.at(0).name());
+    QCOMPARE(pkColumns.size(), 1);
+    QCOMPARE(pkColumns.at(0).name(), tab.fields.at(0).name());
     QVERIFY(tab.fields.at(1).notnull());
     QCOMPARE(tab.fields.at(1).defaultValue(), "'xxxx'");
     QCOMPARE(tab.fields.at(1).check(), "");
@@ -262,9 +291,9 @@ void TestTable::parseSQLdefaultexpr()
     QCOMPARE(tab.fields.at(3).defaultValue(), "");
     QCOMPARE(tab.fields.at(3).check(), "");
 
-    auto pk = tab.primaryKey();
-    QCOMPARE(pk->columnList().size(), 1);
-    QCOMPARE(pk->columnList().at(0), tab.fields.at(0).name());
+    auto pk = tab.primaryKeyColumns();
+    QCOMPARE(pk.size(), 1);
+    QCOMPARE(pk.at(0).name(), tab.fields.at(0).name());
 }
 
 void TestTable::parseSQLMultiPk()
@@ -285,10 +314,10 @@ void TestTable::parseSQLMultiPk()
     QCOMPARE(tab.fields.at(0).type(), "integer");
     QCOMPARE(tab.fields.at(1).type(), "integer");
 
-    auto pk = tab.primaryKey();
-    QCOMPARE(pk->columnList().size(), 2);
-    QCOMPARE(pk->columnList().at(0), tab.fields.at(0).name());
-    QCOMPARE(pk->columnList().at(1), tab.fields.at(1).name());
+    auto pk = tab.primaryKeyColumns();
+    QCOMPARE(pk.size(), 2);
+    QCOMPARE(pk.at(0).name(), tab.fields.at(0).name());
+    QCOMPARE(pk.at(1).name(), tab.fields.at(1).name());
 }
 
 void TestTable::parseSQLForeignKey()
@@ -356,7 +385,7 @@ void TestTable::parseSQLWithoutRowid()
 
     Table tab(*Table::parseSQL(sSQL));
 
-    QCOMPARE(tab.primaryKey()->columnList(), {"a"});
+    QCOMPARE(tab.primaryKeyColumns().at(0).name(), "a");
     QCOMPARE(tab.rowidColumns(), {"a"});
     QCOMPARE(tab.withoutRowidTable(), true);
     QCOMPARE(tab.isStrict(), false);
@@ -430,10 +459,10 @@ void TestTable::parseSQLForeignKeys()
     QCOMPARE(tab.name(), "foreign_key_test");
     QCOMPARE(tab.fields.at(0).name(), "a");
     QCOMPARE(tab.fields.at(0).type(), "int");
-    QCOMPARE(std::dynamic_pointer_cast<sqlb::ForeignKeyClause>(tab.constraint({tab.fields.at(0).name()}, sqlb::Constraint::ForeignKeyConstraintType))->table(), "x");
+    QCOMPARE(tab.foreignKey({tab.fields.at(0).name()})->table(), "x");
     QCOMPARE(tab.fields.at(1).name(), "b");
     QCOMPARE(tab.fields.at(1).type(), "int");
-    QCOMPARE(std::dynamic_pointer_cast<sqlb::ForeignKeyClause>(tab.constraint({tab.fields.at(1).name()}, sqlb::Constraint::ForeignKeyConstraintType))->toString(), "\"w\"(\"y\",\"z\") on delete set null");
+    QCOMPARE(tab.foreignKey({tab.fields.at(1).name()})->toString(), "\"w\"(\"y\",\"z\") on delete set null");
 }
 
 void TestTable::parseSQLCheckConstraint()
@@ -467,6 +496,27 @@ void TestTable::parseDefaultValues()
     QCOMPARE(tab.fields.at(3).name(), "d");
     QCOMPARE(tab.fields.at(3).type(), "text");
     QCOMPARE(tab.fields.at(3).defaultValue(), "'0'");
+}
+
+void TestTable::parseDoubleQuotedDefaultValues()
+{
+    std::string sql = "CREATE TABLE test(a text DEFAULT \"0000-00-00T00:00:00.000\", b text DEFAULT \"He's said \"\"hi\"\"\", c text DEFAULT \"\", d text DEFAULT foo);";
+
+    Table tab(*Table::parseSQL(sql));
+
+    // Double-quoted defaults are string literals and must be written out quoted again
+    QCOMPARE(tab.fields.at(0).defaultValue(), "'0000-00-00T00:00:00.000'");
+    QCOMPARE(tab.fields.at(1).defaultValue(), "'He''s said \"hi\"'");
+    QCOMPARE(tab.fields.at(2).defaultValue(), "''");
+    // Bare identifiers are left as they are
+    QCOMPARE(tab.fields.at(3).defaultValue(), "foo");
+
+    // The generated SQL must be parseable again and yield the same defaults
+    Table tab2(*Table::parseSQL(tab.sql()));
+    QCOMPARE(tab2.fields.at(0).defaultValue(), "'0000-00-00T00:00:00.000'");
+    QCOMPARE(tab2.fields.at(1).defaultValue(), "'He''s said \"hi\"'");
+    QCOMPARE(tab2.fields.at(2).defaultValue(), "''");
+    QCOMPARE(tab2.fields.at(3).defaultValue(), "foo");
 }
 
 void TestTable::createTableWithIn()
@@ -515,7 +565,9 @@ void TestTable::rowValues()
     Table tab(*Table::parseSQL(sql));
     QCOMPARE(tab.name(), "test");
 
-    QCOMPARE(std::dynamic_pointer_cast<sqlb::CheckConstraint>(tab.constraint({}, sqlb::Constraint::CheckConstraintType))->expression(), "(\"a\", \"b\") = (1, 2)");
+    auto c = tab.checkConstraints();
+    QCOMPARE(c.size(), 1);
+    QCOMPARE(c.at(0)->expression(), "(\"a\", \"b\") = (1, 2)");
 }
 
 void TestTable::complexExpressions()
@@ -594,9 +646,9 @@ void TestTable::complexExpression()
     QCOMPARE(tab.fields.at(0).type(), "INTEGER");
     QCOMPARE(tab.fields.at(0).defaultValue(), "(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-' || '4' || substr(hex(randomblob(2)), 2) || '-' || substr('AB89', 1 + (abs(random()) % 4), 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))");
 
-    auto c = tab.constraints({}, sqlb::Constraint::CheckConstraintType);
+    auto c = tab.checkConstraints();
     QCOMPARE(c.size(), 1);
-    QCOMPARE(std::dynamic_pointer_cast<sqlb::CheckConstraint>(c.at(0))->expression(), "(\"a\" = 'S' AND \"b\" IS NOT NULL) OR (\"a\" IN ('A', 'P'))");
+    QCOMPARE(c.at(0)->expression(), "(\"a\" = 'S' AND \"b\" IS NOT NULL) OR (\"a\" IN ('A', 'P'))");
 }
 
 void TestTable::parseIdentifierWithDollar()
